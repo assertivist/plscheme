@@ -1,0 +1,21 @@
+services:
+  plscheme:
+    build: .
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    expose:
+      - "5432"
+  pgtap:
+    image: hbpmip/pgtap:1.0.0-3
+    volumes:
+      - ./test/:/test/
+    depends_on:
+      - "plscheme"
+    environment:
+      TESTS: /test/*.sql
+      HOST: plscheme
+      USER: postgres
+      DATABASE: postgres
+      PASSWORD: postgres
+      VERBOSE: "true"

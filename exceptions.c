@@ -73,7 +73,8 @@ DEFINE_EXCP("invalid-escape-octet",				ERRCODE_INVALID_ESCAPE_OCTET);
 DEFINE_EXCP("invalid-escape-sequence",			ERRCODE_INVALID_ESCAPE_SEQUENCE);
 DEFINE_EXCP("invalid-indicator-parameter-value",
 												ERRCODE_INVALID_INDICATOR_PARAMETER_VALUE);
-DEFINE_EXCP("invalid-limit-value",				ERRCODE_INVALID_LIMIT_VALUE);
+DEFINE_EXCP("invalid-row-count-in-limit-clause",				
+												ERRCODE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE);
 DEFINE_EXCP("invalid-parameter-value",			ERRCODE_INVALID_PARAMETER_VALUE);
 DEFINE_EXCP("invalid-regular-expression",		ERRCODE_INVALID_REGULAR_EXPRESSION);
 DEFINE_EXCP("invalid-time-zone-displacement-value",

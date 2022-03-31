@@ -32,6 +32,7 @@
 #include "lib/stringinfo.h"
 #include "commands/trigger.h"
 #include "access/heapam.h"
+#include "access/xact.h"
 #include "utils/syscache.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
@@ -531,7 +532,7 @@ static void		cache_free(cache_node_t *node);
 static void		cache_unregister(cache_node_t *node);
 
 static arg_t	*build_arg_t(int nargs, Oid *types, char **names,
-							 char *modes, bool *nulls, Datum *values);
+							 char *modes, NullableDatum *values);
 static arg_t	*arg_t_from_tuple(HeapTuple tup, TupleDesc tupdesc,
 								  int *in_nargs);
 static void		parse_func_args(FunctionCallInfo fcinfo,
@@ -646,13 +647,13 @@ _PG_init(void)
 	DefineCustomStringVariable("plscheme" UNTRUSTED_PL_INDICATOR ".module_dir",
 							   "Module directory for initialization and data "
 							   "conversion scripts.",
-							   NULL, &module_dir, PGC_BACKEND, NULL, NULL);
+							   NULL, &module_dir, module_dir, PGC_BACKEND, 0, NULL, NULL, NULL);
 	
 	DefineCustomIntVariable("plscheme" UNTRUSTED_PL_INDICATOR ".cache_max_size",
 							"Maximum number of (non-volatile and non-SRF) "
 							"procedures to cache.",
-							NULL, &cache_max_size, 0, 1024, PGC_BACKEND,
-							NULL, NULL);
+							NULL, &cache_max_size, 512, 0, 1024, PGC_BACKEND,
+							0, NULL, NULL, NULL);
 }
 
 
@@ -1202,7 +1203,7 @@ cache_register_meta(void)
 {
 	cache_node_t	*n;
 	proc_t			*p;
-	char			 s[128];
+	char	    s[128];
 
 	/* Make available room for addition. */
 	cache_unregister_deprecated();
@@ -1223,13 +1224,19 @@ cache_register_meta(void)
 	snprintf(s, 128, "plscheme-cached-proc-%d", proc->id);
 
 	/*
-	 * Create a new memory context for the to be cached procedure. This allows
+	 * Create a new memory context for the to-be-cached procedure. This allows
 	 * us to reclaim the function's storage cleanly.
 	 */
-	n->mcxt = AllocSetContextCreate(TopTransactionContext, s,
+	n->mcxt = AllocSetContextCreate(TopTransactionContext, "plscheme-cache-proc",
 									ALLOCSET_DEFAULT_MINSIZE,
 									ALLOCSET_DEFAULT_INITSIZE,
 									ALLOCSET_DEFAULT_MAXSIZE);
+	/* 
+	 * Postgres no longer allows setting a non-static name in 
+	 * AllocSetContextCreate, you must now call the following function to set 
+	 * a dynamic name.
+	 */
+	MemoryContextSetIdentifier(n->mcxt, s);
 
 	/* Switch to procedure's memory context. */
 	MemoryContextSwitchTo(n->mcxt);
@@ -1365,7 +1372,7 @@ static void
 cache_unregister(cache_node_t *node)
 {
 	cache_node_t	*p;
-	bool			 found = false;
+	//bool			 found = false;
 
 	/* Neither cache_node, nor node can be null in this situation. */
 	Assert(cache_nodes && node);
@@ -1403,7 +1410,7 @@ ProceedRemove:
  */
 static arg_t *
 build_arg_t(int nargs, Oid *types, char **names, char *modes,
-			bool *nulls, Datum *values)
+			NullableDatum *values)
 {
 	arg_t	*args = palloc(nargs * sizeof(arg_t));
 	int		 i;
@@ -1423,7 +1430,7 @@ build_arg_t(int nargs, Oid *types, char **names, char *modes,
 		 * set it true for OUT arguments to avoid from redundant
 		 * processing. (See !args[i].isnull checks below.)
 		 */
-		args[i].isnull = (args[i].mode != PROARGMODE_OUT) ? nulls[i] : true;
+		args[i].isnull = (args[i].mode != PROARGMODE_OUT) ? values[i].isnull : true;
 		
 		typetup = SearchSysCache(TYPEOID, ObjectIdGetDatum(types[i]), 0, 0, 0);
 		if (!HeapTupleIsValid(typetup))
@@ -1447,7 +1454,7 @@ build_arg_t(int nargs, Oid *types, char **names, char *modes,
 
 			if (!args[i].isnull)
 				args[i].value = OidOutputFunctionCall(typestruct->typoutput,
-													  values[i]);
+													  values[i].value);
 		}
 		
 		/*
@@ -1465,7 +1472,7 @@ build_arg_t(int nargs, Oid *types, char **names, char *modes,
 			Oid				 *sub_types;
 			char			**sub_names;
 			bool			 *sub_nulls;
-			Datum			 *sub_values;
+			NullableDatum	 *sub_values;
 			
 			args[i].isrow = true;
 
@@ -1473,7 +1480,7 @@ build_arg_t(int nargs, Oid *types, char **names, char *modes,
 			if (args[i].isnull)
 				goto EndOfLoop;
 
-			tuph = DatumGetHeapTupleHeader(values[i]);
+			tuph = DatumGetHeapTupleHeader(values[i].value);
 			
 			/* Extract rowtype info and find a tupdesc. */
 			tuptype = HeapTupleHeaderGetTypeId(tuph);
@@ -1486,25 +1493,27 @@ build_arg_t(int nargs, Oid *types, char **names, char *modes,
 
 			/* Calculate will be required room count. */
 			for (j = sub_nargs = 0; j < tupdesc->natts; j++)
-				if (!tupdesc->attrs[j]->attisdropped || ispseudorecord)
+				if (!tupdesc->attrs[j].attisdropped || ispseudorecord)
 					sub_nargs++;
 
 			sub_types = palloc(sub_nargs * sizeof(Oid));
 			sub_names = palloc(sub_nargs * sizeof(char *));
 			sub_nulls = palloc(sub_nargs * sizeof(bool));
-			sub_values = palloc(sub_nargs * sizeof(Datum));
+			sub_values = palloc(sub_nargs * sizeof(NullableDatum));
 			
 			for (j = k = 0; j < tupdesc->natts; j++)
 				/*
 				 * Record row types are logically invisible, therefore their
 				 * attisdropped attribute is always true.
 				 */
-				if (!tupdesc->attrs[j]->attisdropped || ispseudorecord)
+				if (!tupdesc->attrs[j].attisdropped || ispseudorecord)
 				{
-					sub_values[k] = heap_getattr(&tupdata, (j + 1), tupdesc,
-												 &sub_nulls[k]);
-					sub_types[k] = tupdesc->attrs[j]->atttypid;
-					sub_names[k] = NameStr(tupdesc->attrs[j]->attname);
+					NullableDatum v = {.isnull = false, .value = heap_getattr(&tupdata, (j + 1), tupdesc,
+												 &sub_nulls[k])};
+					v.isnull = sub_nulls[k];
+					sub_values[k] = v;
+					sub_types[k] = tupdesc->attrs[j].atttypid;
+					sub_names[k] = NameStr(tupdesc->attrs[j].attname);
 
 					k++;
 				}
@@ -1512,7 +1521,7 @@ build_arg_t(int nargs, Oid *types, char **names, char *modes,
 			/* Recursively parse inner tuple. */
 			args[i].nargs = sub_nargs;
 			args[i].args = build_arg_t(sub_nargs, sub_types, sub_names,
-									   NULL, sub_nulls, sub_values);
+									   NULL, sub_values);
 			
 			ReleaseTupleDesc(tupdesc);
 		}
@@ -1546,30 +1555,32 @@ arg_t_from_tuple(HeapTuple tup, TupleDesc tupdesc, int *in_nargs)
 	Oid		 *types;
 	char	**names;
 	bool	 *nulls;
-	Datum	 *values;
+	NullableDatum	 *values;
 
 	/* Calculate available attributes. */
 	for (i = nargs = 0; i < tupdesc->natts; i++)
-		if (!tupdesc->attrs[i]->attisdropped)
+		if (!tupdesc->attrs[i].attisdropped)
 			nargs++;
 
 	types = palloc(nargs * sizeof(Oid));
 	names = palloc(nargs * sizeof(char *));
 	nulls = palloc(nargs * sizeof(bool));
-	values = palloc(nargs * sizeof(Datum));
+	values = palloc(nargs * sizeof(NullableDatum));
 
 	for (i = j = 0; i < tupdesc->natts; i++)
-		if (!tupdesc->attrs[i]->attisdropped)
+		if (!tupdesc->attrs[i].attisdropped)
 		{
-			values[j] = heap_getattr(tup, (i + 1), tupdesc, &nulls[j]);
-			names[j] = NameStr(tupdesc->attrs[i]->attname);
-			types[j] = tupdesc->attrs[i]->atttypid;
+			NullableDatum v = {.isnull = false, .value = heap_getattr(tup, (i + 1), tupdesc, &nulls[j])};
+			v.isnull = nulls[j];
+			values[j] = v;//
+			names[j] = NameStr(tupdesc->attrs[i].attname);
+			types[j] = tupdesc->attrs[i].atttypid;
 
 			++j;
 		}
 	
 	*in_nargs = nargs;
-	return build_arg_t(nargs, types, names, NULL, nulls, values);
+	return build_arg_t(nargs, types, names, NULL, values);
 }
 
 
@@ -1607,7 +1618,7 @@ parse_func_args(FunctionCallInfo fcinfo, HeapTuple proctup,
 
 	/* Build arg_t array. */
 	proc->args = build_arg_t(proc->nargs, types, names, modes,
-							 fcinfo->argnull, fcinfo->arg);
+							 fcinfo->args);
 }
 
 
@@ -1987,7 +1998,7 @@ build_tupledesc(int nelems, Oid *types, char *modes, char **names)
 	Assert(nelems > 0);
 
 	/* Create template. */
-	tupdesc = CreateTemplateTupleDesc(nelems, false);
+	tupdesc = CreateTemplateTupleDesc(nelems);
 
 	/* Place attributes' meta-information. */
 	for (i = 0; i < nelems; i++)
@@ -2118,7 +2129,7 @@ tuple_t_from_alist(SCM alist, char mode, bool inner, arg_t *args, int nargs)
 				HeapTuple		typetup;
 				Form_pg_type	typestruct;
 
-				parseTypeString(typename, &typid, &typmod);
+				parseTypeString(typename, &typid, &typmod, false);
 
 				typetup = SearchSysCache(TYPEOID,
 										 ObjectIdGetDatum(typid),
@@ -2617,7 +2628,7 @@ soft_port_create(void)
 	scm_vector_set_x(pv, scm_from_int(0), handler_c);
 	scm_vector_set_x(pv, scm_from_int(1), handler_s);
 	
-	return scm_make_soft_port(pv, scm_mem2string("w", 1));
+	return scm_make_soft_port(pv, scm_from_latin1_string("w"));
 }
 
 
@@ -2641,10 +2652,10 @@ guile_init(void)
 		guile_backtrace_stack = SCM_BOOL_F;
 
 		/* Enable backtracing. */
-		SCM_DEVAL_P = 1;
-		SCM_BACKTRACE_P = 1;
-		SCM_RECORD_POSITIONS_P = 1;
-		SCM_RESET_DEBUG_MODE;
+		//SCM_DEVAL_P = 1;
+		//SCM_BACKTRACE_P = 1;
+		//SCM_RECORD_POSITIONS_P = 1;
+		//SCM_RESET_DEBUG_MODE;
 
 		guile_init_level = 1;
 	}
@@ -2928,7 +2939,7 @@ guile_exception_handler(void *data, SCM tag, SCM args)
 	s[l - 1] = '\0';
 	ereport(ERROR,
 			(errcode(ERRCODE_SYNTAX_ERROR),
-			 errmsg("Uncaugth exception thrown from PL/scheme procedure."),
+			 errmsg("Uncaught exception thrown from PL/scheme procedure."),
 			 errdetail("Guile error output:\n%s", s)));
 	
 	return SCM_UNSPECIFIED; /* Never reached. */
@@ -3201,7 +3212,7 @@ spi_return_tuples(int ret, SCM throw_args)
 
 		/* Number of attributes a single tuple will hold. */
 		for (natts = i = 0; i < tupdesc->natts; i++)
-			if (!tupdesc->attrs[i]->attisdropped)
+			if (!tupdesc->attrs[i].attisdropped)
 				natts++;
 
 		for (i = 0; i < ntuples; i++)
@@ -3214,13 +3225,13 @@ spi_return_tuples(int ret, SCM throw_args)
 			{
 				bool			 isnull;
 				Datum			 attr;
-				Oid				 atttypid = tupdesc->attrs[j]->atttypid;
+				Oid				 atttypid = tupdesc->attrs[j].atttypid;
 				HeapTuple		 typetup;
 				Form_pg_type	 typestruct;
 				char			*outputstr;
 				SCM				 val;
 				
-				if (tupdesc->attrs[j]->attisdropped)
+				if (tupdesc->attrs[j].attisdropped)
 					continue;
 
 				attr = heap_getattr(tuple, (j + 1), tupdesc, &isnull);
@@ -3327,7 +3338,7 @@ spi_prepare(SCM in_command, SCM in_argtypes)
 			SCM_VALIDATE_STRING(1, scm);
 			SCM_SAFE_STRDUP(scm, typname);
 
-			parseTypeString(typname, &argtypes[i], &typmod);
+			parseTypeString(typname, &argtypes[i], &typmod, false);
 		}
 	}
 	else

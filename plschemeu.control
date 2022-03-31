@@ -1,0 +1,6 @@
+# plschemeu extension
+comment = 'load Guile Scheme interpreter and execute Scheme from within a database'
+default_version = '0.0.2'
+module_pathname = '$libdir/plschemeu'
+relocatable = true
+
