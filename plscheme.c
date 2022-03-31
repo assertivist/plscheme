@@ -2626,7 +2626,7 @@ soft_port_create(void)
 	scm_vector_set_x(pv, scm_from_int(0), handler_c);
 	scm_vector_set_x(pv, scm_from_int(1), handler_s);
 	
-	return scm_make_soft_port(pv, scm_from_latin1_string("w"));
+	return scm_make_soft_port(pv, scm_from_utf8_string("w"));
 }
 
 
