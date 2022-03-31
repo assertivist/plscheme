@@ -1508,10 +1508,9 @@ build_arg_t(int nargs, Oid *types, char **names, char *modes,
 				 */
 				if (!tupdesc->attrs[j].attisdropped || ispseudorecord)
 				{
-					NullableDatum v = {.isnull = false, .value = heap_getattr(&tupdata, (j + 1), tupdesc,
+					sub_values[k] = (NullableDatum) {.isnull = false, .value = heap_getattr(&tupdata, (j + 1), tupdesc,
 												 &sub_nulls[k])};
-					v.isnull = sub_nulls[k];
-					sub_values[k] = v;
+					sub_values[k].isnull = sub_nulls[k];
 					sub_types[k] = tupdesc->attrs[j].atttypid;
 					sub_names[k] = NameStr(tupdesc->attrs[j].attname);
 
@@ -1570,9 +1569,8 @@ arg_t_from_tuple(HeapTuple tup, TupleDesc tupdesc, int *in_nargs)
 	for (i = j = 0; i < tupdesc->natts; i++)
 		if (!tupdesc->attrs[i].attisdropped)
 		{
-			NullableDatum v = {.isnull = false, .value = heap_getattr(tup, (i + 1), tupdesc, &nulls[j])};
-			v.isnull = nulls[j];
-			values[j] = v;//
+			values[j] = (NullableDatum) {.isnull = false, .value = heap_getattr(tup, (i + 1), tupdesc, &nulls[j])};
+			values[j].isnull = nulls[j];
 			names[j] = NameStr(tupdesc->attrs[i].attname);
 			types[j] = tupdesc->attrs[i].atttypid;
 
